@@ -20,14 +20,12 @@ int main()
     uint8_t missingPath[] = {0x12, 0xAB, 0x05};
     assert(tree.createChildren(missingPath, 3) == false);
 
-    // 3) 查找不存在的路径 -> nullptr；空路径 -> root 的槽
-    assert(tree._find_node(missingPath, 3) == nullptr);
-    assert(tree._find_node(nullptr, 0) != nullptr);
-
+    // 3) _find_node 已改为内部接口，demo 不再直接访问；
+    //    缺失路径的行为由上面 createChildren(missingPath, 3) == false 覆盖
     // 4) public free_node 仍是占位实现（TODO），当前约定返回 false
     assert(tree.free_node(missingPath, 3) == false);
 
-    std::puts("[demo] createChildren / _find_node / free_node 行为符合预期");
+    std::puts("[demo] createChildren / free_node 行为符合预期");
     std::puts("[demo] TODO: insert、find-value、external path 跳转、HVcache 准入淘汰尚未实现");
     return 0;
 }
