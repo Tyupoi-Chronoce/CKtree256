@@ -16,13 +16,18 @@ int main()
     assert(tree.createChildren(nullptr, 0) == true);
     assert(tree.createChildren(nullptr, 0) == true);
 
-    // 2) 路径上的节点还不存在：createChildren 应该安全地返回 false，而不是崩溃
+    // 2) 非空 path 指针 + length 0：也应回到根节点。
+    //    早期版本在这里把根节点的 rootNodeP 槽错误清空，导致后续 createChildren 失败。
+    uint8_t emptyPath[1] = {0x00};
+    assert(tree.createChildren(emptyPath, 0) == true);
+
+    // 3) 路径上的节点还不存在：createChildren 应该安全地返回 false，而不是崩溃
     uint8_t missingPath[] = {0x12, 0xAB, 0x05};
     assert(tree.createChildren(missingPath, 3) == false);
 
-    // 3) _find_node 已改为内部接口，demo 不再直接访问；
+    // 4) _find_node 已改为内部接口，demo 不再直接访问；
     //    缺失路径的行为由上面 createChildren(missingPath, 3) == false 覆盖
-    // 4) public free_node 仍是占位实现（TODO），当前约定返回 false
+    // 5) public free_node 仍是占位实现（TODO），当前约定返回 false
     assert(tree.free_node(missingPath, 3) == false);
 
     std::puts("[demo] createChildren / free_node 行为符合预期");

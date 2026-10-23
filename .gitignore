@@ -3,3 +3,6 @@ introduction.md
 *.o
 *.exe
 
+
+.dsh/*
+
