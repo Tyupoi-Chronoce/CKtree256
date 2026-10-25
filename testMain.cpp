@@ -1,36 +1,98 @@
-// testMain.cpp -- CKtree256 最小 smoke demo
-// 编译： g++ -std=c++20 testMain.cpp -o cktree_demo
+// testMain.cpp -- CKtree256 API smoke test
+// 编译： g++ -std=c++20 -Wall -Wextra -Wpedantic testMain.cpp -o cktree_test
 // 说明： classBasic.cpp 目前是“头文件式”实现，直接把整份实现包含进来。
-//        当前还没有 insert / find-value，本 demo 只验证已有接口的行为。
+//        当前覆盖 root/空 path、单字节/多字节 key、前缀数据、嵌入 0、覆盖写、缺失 path、非法参数。
+//        外部路径跳转、HVcache 准入淘汰、free_node 仍未实现，不在本测试范围。
+
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 
 #include "classBasic.cpp"
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 
 int main()
 {
     CKtree::Tree256 tree(1024);   // 缓存槽数 1024（内部下限 0xff）
 
-    // 1) 根节点的子指针数组：可以创建，且是幂等的
-    assert(tree.createChildren(nullptr, 0) == true);
-    assert(tree.createChildren(nullptr, 0) == true);
+    int rootData = 1;
+    int oneData = 2;
+    int oneData2 = 3;
+    int twoData = 4;
+    int zeroData = 5;
+    int deepData = 6;
+    int missingData = 7;
 
-    // 2) 非空 path 指针 + length 0：也应回到根节点。
-    //    早期版本在这里把根节点的 rootNodeP 槽错误清空，导致后续 createChildren 失败。
-    uint8_t emptyPath[1] = {0x00};
-    assert(tree.createChildren(emptyPath, 0) == true);
+    uint8_t keyOne[1] = {0x41};
+    uint8_t keyOneZero[2] = {0x41, 0x00};
+    uint8_t keyZero[1] = {0x00};
+    uint8_t keyDeep[3] = {0x41, 0x42, 0x43};
+    uint8_t keyMissing[2] = {0x12, 0xAB};
+    uint8_t keyMissingLong[3] = {0x12, 0xAB, 0x05};
+    uint8_t emptyPath[1] = {0xFF};   // 非空指针 + length 0，语义上仍指向根
 
-    // 3) 路径上的节点还不存在：createChildren 应该安全地返回 false，而不是崩溃
-    uint8_t missingPath[] = {0x12, 0xAB, 0x05};
-    assert(tree.createChildren(missingPath, 3) == false);
+    // 0) 空树：根节点存在，但还没有数据
+    assert(tree.get_data(nullptr, 0) == nullptr);
+    assert(tree.get_data(keyOne, 1) == nullptr);
 
-    // 4) _find_node 已改为内部接口，demo 不再直接访问；
-    //    缺失路径的行为由上面 createChildren(missingPath, 3) == false 覆盖
-    // 5) public free_node 仍是占位实现（TODO），当前约定返回 false
-    assert(tree.free_node(missingPath, 3) == false);
+    // 1) 根节点写入：nullptr + 0 和 非空指针 + 0 都应落到根
+    assert(tree.put_data(nullptr, 0, &rootData));
+    assert(tree.get_data(nullptr, 0) == &rootData);
+    assert(tree.get_data(emptyPath, 0) == &rootData);
 
-    std::puts("[demo] createChildren / free_node 行为符合预期");
-    std::puts("[demo] TODO: insert、find-value、external path 跳转、HVcache 准入淘汰尚未实现");
+    // 2) 单字节 key；get_data 的 length 决定节点，不依赖 C 字符串
+    assert(tree.get_data(keyOne, 1) == nullptr);
+    assert(tree.put_data(keyOne, 1, &oneData));
+    assert(tree.get_data(keyOne, 1) == &oneData);
+    assert(tree.get_data(keyOne, 0) == &rootData);
+
+    // 3) 前缀和子路径是不同节点；插入子节点不能覆盖父节点数据
+    assert(tree.get_data(keyOneZero, 2) == nullptr);
+    assert(tree.put_data(keyOneZero, 2, &twoData));
+    assert(tree.get_data(keyOneZero, 2) == &twoData);
+    assert(tree.get_data(keyOneZero, 1) == &oneData);
+    assert(tree.get_data(keyOne, 1) == &oneData);
+
+    // 4) 中间节点可以没有 data；缺失 path 和“存在但无 data”目前都返回 nullptr
+    assert(tree.put_data(keyDeep, 3, &deepData));
+    assert(tree.get_data(keyDeep, 3) == &deepData);
+    assert(tree.get_data(keyDeep, 2) == nullptr);
+    assert(tree.get_data(keyMissing, 2) == nullptr);
+    assert(tree.get_data(keyMissingLong, 3) == nullptr);
+
+    // 5) 嵌入 0 和首字节 0 都是合法 key 字节
+    assert(tree.put_data(keyZero, 1, &zeroData));
+    assert(tree.get_data(keyZero, 1) == &zeroData);
+    assert(tree.get_data(emptyPath, 0) == &rootData);
+
+    // 6) 同一 path 重复 put_data：覆盖指针，不释放旧 data
+    assert(tree.put_data(keyOne, 1, &oneData2));
+    assert(tree.get_data(keyOne, 1) == &oneData2);
+    assert(tree.get_data(keyOneZero, 2) == &twoData);
+
+    // 7) 缺失 path 可以通过 put_data 建立；更长前缀仍然缺失
+    assert(tree.put_data(keyMissing, 2, &missingData));
+    assert(tree.get_data(keyMissing, 2) == &missingData);
+    assert(tree.get_data(keyMissingLong, 3) == nullptr);
+
+    // 8) 非法参数：nullptr + 非零长度、空 data
+    assert(!tree.put_data(nullptr, 1, &rootData));
+    assert(!tree.put_data(keyOne, 1, nullptr));
+    assert(tree.get_data(nullptr, 1) == nullptr);
+
+    // 9) 已有接口回归：createChildren 幂等，free_node 仍是占位返回 false
+    assert(tree.createChildren(nullptr, 0));
+    assert(tree.createChildren(keyOne, 1));
+    assert(tree.createChildren(keyOne, 1));
+    assert(!tree.createChildren(keyMissingLong, 3));
+    assert(tree.get_data(keyOne, 1) == &oneData2);
+    assert(!tree.free_node(keyOne, 1));
+    assert(tree.get_data(nullptr, 0) == &rootData);
+
+    std::puts("[test] put_data / get_data / createChildren / free_node OK");
+    std::puts("[test] TODO: external path 跳转、HVcache 准入淘汰、free_node 仍未实现");
     return 0;
 }
