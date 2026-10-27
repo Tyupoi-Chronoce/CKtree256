@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <mutex>
+#include <new>
 
 
 
@@ -24,6 +25,7 @@ namespace CKtree
         void *dataP = nullptr; // data is from the user, so must be freed by the user and the type ofit is user's responsibility
         treeNode **childFP = nullptr;
         uint8_t *externalRelatedLink_nodePathP = nullptr;
+        bool has_externalLink = false;
         bool is_linkNode_targetCached = false; // for the externalRelatedLink_node
         bool self_in_cache = false;
         uint32_t linkNode_cacheIndex = 0; // index ==0 -> nullptr(cached not), for the externalRelatedLink_node, too 
@@ -69,6 +71,7 @@ namespace CKtree
         {
             resData_32u res;
             if (nodeP == nullptr || *nodeP == nullptr) {return res; } // cant
+
             for (size_t index =1; index <= size0f_HVcache; ++index)
             {
                 if (*nodeP == HVcache_nodeP[index]) // check if it's already in the cache
@@ -102,13 +105,17 @@ namespace CKtree
         */
         bool _remove_from_cache(treeNode** nodeP)
         {
-            const uint32_t cacheIndex = (*nodeP)->self_cacheIndex;
-            if (cacheIndex == 0 || HVcache_nodeP[cacheIndex] != (*nodeP) || cacheIndex > size0f_HVcache
-                 || HVcache_aliveState[cacheIndex] == false) {return false; }
+            if (nodeP == nullptr || *nodeP == nullptr) {return false; }
+
+            treeNode *node = *nodeP;
+            const uint32_t cacheIndex = node->self_cacheIndex;
+            if (cacheIndex == 0 || cacheIndex > size0f_HVcache) {return false; }
+            if (HVcache_nodeP[cacheIndex] != node || HVcache_aliveState[cacheIndex] == false) {return false; }
+            
             HVcache_aliveState[cacheIndex] = false;
             HVcache_nodeP[cacheIndex] = nullptr;
-            (*nodeP)->self_in_cache = false;
-            (*nodeP)->self_cacheIndex = 0;
+            node->self_in_cache = false;
+            node->self_cacheIndex = 0;
             return true;
         }
 
@@ -255,15 +262,58 @@ namespace CKtree
             do what-- try to put the node linked by the specified node into the cache
             tips-- nodePath -> nodeP -> externalRelatedLink_node as targetNode -> put it into the cache;
                 -- if the targetNode is already in the cache, return false;
-                -- hold private lock;
+                -- if the hit counts of targetNode is not enough, return false;
+                -- caller must hold the private lock;
         */
         bool _put2cache(uint8_t* nodePathP, size_t length)
         {
-            std::unique_lock<std::mutex> lock(privateMutex);
+            //std::unique_lock<std::mutex> lock(privateMutex);
             treeNode **nodeP = _find_node(nodePathP, length);
             if (nodeP == nullptr || *nodeP == nullptr) {return false; }
             if ((*nodeP)->externalRelatedLink_nodePathP == nullptr
                  || (*nodeP)->length_externaRelatedlLink_nodePath == 0) {return false; }
+            if ((*nodeP)->linkNode_hitCounts <= minCounts_move2cache) {return false; }
+
+            treeNode **targetNodeP = _find_node((*nodeP)->externalRelatedLink_nodePathP, (*nodeP)->length_externaRelatedlLink_nodePath);
+            if (targetNodeP == nullptr || *targetNodeP == nullptr) {return false; }
+
+            // Only trust linkNode_cacheIndex while its slot still points at this target.
+            const uint32_t oldIndex = (*nodeP)->linkNode_cacheIndex;
+            if (oldIndex != 0 && oldIndex <= size0f_HVcache && HVcache_aliveState[oldIndex]
+                && HVcache_nodeP[oldIndex] == *targetNodeP)
+            {
+                (*nodeP)->is_linkNode_targetCached = true;
+                return false; // target is already cached
+            }
+            (*nodeP)->linkNode_cacheIndex = 0;
+            (*nodeP)->is_linkNode_targetCached = false;
+
+            resData_32u res = _can_putInto_cache(targetNodeP);
+            if (res.is_valid) // can put it in
+            {
+                (*nodeP)->is_linkNode_targetCached = true;
+                (*nodeP)->linkNode_cacheIndex = res.value32u;
+                return true;
+            }
+            return false;
+        }
+
+        /*
+            input-- the pointer pointed to a node
+            output-- true if success, false if not
+            do what-- try to put the node linked by the specified node into the cache
+            tips-- nodePath -> nodeP -> externalRelatedLink_node as targetNode -> put it into the cache;
+                -- if the targetNode is already in the cache, return false;
+                -- if the hit counts of targetNode is not enough, return false;
+                -- caller must hold the private lock;
+        */
+        bool _put2cache(treeNode** nodeP)
+        {
+            if (nodeP == nullptr || *nodeP == nullptr) {return false; }
+            //std::unique_lock<std::mutex> lock(privateMutex);
+            if ((*nodeP)->externalRelatedLink_nodePathP == nullptr
+                 || (*nodeP)->length_externaRelatedlLink_nodePath == 0) {return false; }
+            if ((*nodeP)->linkNode_hitCounts <= minCounts_move2cache) {return false; }
 
             treeNode **targetNodeP = _find_node((*nodeP)->externalRelatedLink_nodePathP, (*nodeP)->length_externaRelatedlLink_nodePath);
             if (targetNodeP == nullptr || *targetNodeP == nullptr) {return false; }
@@ -292,12 +342,12 @@ namespace CKtree
         /*
             input-- the index of the cache slot
             output-- a pointer points to the node
-            do what-- return the pointer of the node if it exists, or nullptr
+            do what-- return the pointer of the node if it exists in cache, or nullptr
         */
         treeNode** _find_from_cache(size_t cacheIndex)
         {
             if (cacheIndex == 0 || cacheIndex > size0f_HVcache) {return nullptr; }
-            if (HVcache_aliveState[cacheIndex] == false && HVcache_nodeP[cacheIndex] == nullptr) {return nullptr; }
+            if (HVcache_aliveState[cacheIndex] == false || HVcache_nodeP[cacheIndex] == nullptr) {return nullptr; }
 
             return HVcache_nodeP + cacheIndex;
         }
@@ -385,10 +435,116 @@ namespace CKtree
             return (*targetNodeP)->dataP;
         }
 
-        /* pause */
-        bool free_node(uint8_t* /*nodePathP*/, size_t /*length*/)
+        /*
+            input-- path of node, length of nodePath
+            output-- true if success, false if args invalid or erase failed
+            do what-- erase the data of the node if it exists
+            tips-- if the length == 0, erase the data of the root node;
+                -- hold private lock;
+        */
+        bool erase_data(uint8_t* nodePathP, size_t length)
+        {
+            if (nodePathP == nullptr && length != 0) {return false; }
+            std::unique_lock<std::mutex> lock(privateMutex);
+
+            treeNode **targetNodeP = _find_node(nodePathP, length);
+            if (targetNodeP == nullptr) {return false; }
+
+            (*targetNodeP)->dataP = nullptr;
+            return true;
+        }
+
+        /*
+            input-- the pointer pointed to the dst node, path of node to linked, length of nodePath
+            output-- true if success, false if args invalid or link failed
+            do what-- link a node to another node
+            tips-- the dst and src nodes must exist;
+                -- a later link_node on the same node overwrites the old pointer with freeing it;
+                -- hold private lock;
+        */
+        bool link_node(treeNode** dstNodeP, uint8_t* linkPathP, size_t length_linkedPath)
+        {
+            if (dstNodeP == nullptr) {return false; }
+            if (linkPathP == nullptr && length_linkedPath != 0) {return false; }
+            std::unique_lock<std::mutex> lock(privateMutex);
+
+            treeNode *dstNode = *dstNodeP;
+            if (dstNode == nullptr) {return false; }
+
+            uint8_t *linkPath_copy = nullptr;
+            if (length_linkedPath != 0)
+            {
+                linkPath_copy = new (std::nothrow) uint8_t[length_linkedPath];
+                if (linkPath_copy == nullptr) {return false; }
+                std::memcpy(linkPath_copy, linkPathP, length_linkedPath);
+            }
+
+            treeNode **linkNodeP = _find_node(linkPath_copy, length_linkedPath);
+            if (linkNodeP == nullptr || *linkNodeP == nullptr) 
+            {
+                delete[] linkPath_copy;
+                return false; 
+            }
+
+            delete[] dstNode->externalRelatedLink_nodePathP;
+            dstNode->externalRelatedLink_nodePathP = linkPath_copy;
+            dstNode->length_externaRelatedlLink_nodePath = length_linkedPath;
+            dstNode->has_externalLink = true;
+
+            dstNode->is_linkNode_targetCached = false;
+            dstNode->linkNode_cacheIndex = 0;
+            dstNode->linkNode_hitCounts = 0;
+            return true;
+        }
+
+        /*
+            input-- the pointer pointed to a node
+            output-- a pointer pointes to a node if it exists, or nullptr
+            do what-- return the pointer of the node linked by the node from input if it exists and args valid
+            tips-- find from cache at first when the node from input says the link node is in cache;
+                -- if input node say link node is but not in cache, find it by path and maintain the status of cache;
+                -- hold private lock;
+        */
+        treeNode** get_linkNode(treeNode** nodeP)
+        {
+            if (nodeP == nullptr) {return nullptr; }
+            std::unique_lock<std::mutex> lock(privateMutex);
+
+            treeNode *node = *nodeP;
+            if (node == nullptr) {return nullptr; }
+            if (!node->has_externalLink) {return nullptr; }
+            if (node->externalRelatedLink_nodePathP == nullptr && node->length_externaRelatedlLink_nodePath != 0) {return nullptr; }
+            if (node->length_externaRelatedlLink_nodePath == 0) {return &rootNodeP; }
+
+            treeNode **resNodeP;
+            if (node->is_linkNode_targetCached)
+            {
+                resNodeP = _find_from_cache(node->linkNode_cacheIndex);
+                if (resNodeP != nullptr && *resNodeP != nullptr) 
+                {
+                    ++node->linkNode_hitCounts;
+                    return resNodeP; 
+                }
+                node->linkNode_cacheIndex = 0;
+                node->is_linkNode_targetCached = false;
+            }
+
+            resNodeP = _find_node(node->externalRelatedLink_nodePathP, node->length_externaRelatedlLink_nodePath);
+            if (resNodeP == nullptr || *resNodeP == nullptr) {return nullptr; }
+            
+            ++node->linkNode_hitCounts;
+            if (node->linkNode_hitCounts > minCounts_move2cache) {_put2cache(nodeP); }
+            return resNodeP;
+        }
+
+        /* in design phase, currently */
+        bool free_node(uint8_t* /*nodePathP*/, size_t /*length*/, bool /*freeData*/)
         {return false; }
 
+        /*
+            tips-- hold private lock;
+                -- if the layer is too deep, it's recommended to manually release it in segments starting from the end;
+        */
         ~Tree256()
         {
             std::unique_lock<std::mutex> lock(privateMutex);

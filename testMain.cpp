@@ -1,8 +1,8 @@
 // testMain.cpp -- CKtree256 API smoke test
 // 编译： g++ -std=c++20 -Wall -Wextra -Wpedantic testMain.cpp -o cktree_test
 // 说明： classBasic.cpp 目前是“头文件式”实现，直接把整份实现包含进来。
-//        当前覆盖 root/空 path、单字节/多字节 key、前缀数据、嵌入 0、覆盖写、缺失 path、非法参数。
-//        外部路径跳转、HVcache 准入淘汰、free_node 仍未实现，不在本测试范围。
+//        当前覆盖 root/空 path、单字节/多字节 key、前缀数据、嵌入 0、覆盖写、缺失 path、非法参数、erase_data、free_node 占位。
+//        external link / HVcache 目前只有内部实现，尚无公开 node 入口；free_node 仍是占位，不在本测试范围。
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -89,10 +89,16 @@ int main()
     assert(tree.createChildren(keyOne, 1));
     assert(!tree.createChildren(keyMissingLong, 3));
     assert(tree.get_data(keyOne, 1) == &oneData2);
-    assert(!tree.free_node(keyOne, 1));
+    assert(!tree.free_node(keyOne, 1, false));
     assert(tree.get_data(nullptr, 0) == &rootData);
 
-    std::puts("[test] put_data / get_data / createChildren / free_node OK");
-    std::puts("[test] TODO: external path 跳转、HVcache 准入淘汰、free_node 仍未实现");
+    // 10) erase_data：缺失 path false；已存在节点清数据（已经为空也返回 true）
+    assert(!tree.erase_data(keyMissingLong, 3));
+    assert(tree.erase_data(keyZero, 1));
+    assert(tree.get_data(keyZero, 1) == nullptr);
+    assert(tree.erase_data(keyZero, 1));
+
+    std::puts("[test] put_data / get_data / erase_data / createChildren / free_node OK");
+    std::puts("[test] TODO: external link / HVcache 缺公开 node 入口，free_node 仍未实现");
     return 0;
 }
