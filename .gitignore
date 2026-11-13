@@ -2,6 +2,7 @@
 introduction.md
 *.o
 *.exe
+test/*
 
 
 .dsh/*
