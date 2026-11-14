@@ -1,7 +1,7 @@
 // smoke.cpp -- CKtree256 public API smoke test
 //
 // DSH-managed smoke test. Build and run from the repository root:
-//   g++ -std=c++20 -Wall -Wextra -Wpedantic smoke.cpp -o smoke
+//   g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic smoke.cpp -o smoke
 //   ./smoke
 //
 // testMain.cpp is intentionally left as the user's own experimental entry point.
@@ -11,7 +11,7 @@
 // embedded 0, overwrite, missing paths, invalid arguments, createChildren,
 // link_node argument checks, and free_nodeTree.
 // Not covered: successful link_node -> get_linkNode jumps, because get_linkNode
-// still takes treeNode** and there is no public node-handle accessor yet.
+// still takes treeNode<T>** and there is no public node-handle accessor yet.
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -25,7 +25,7 @@
 
 int main()
 {
-    CKtree::Tree256 tree(1024);   // HVcache slots; the constructor clamps to 0xff minimum
+    CKtree::Tree256<int> tree(1024);   // typed tree; HVcache slots clamp to 0xff minimum
 
     int rootData = 1;
     int aData = 2;

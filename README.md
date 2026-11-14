@@ -10,44 +10,48 @@ An experimental **256-way byte-radix tree**. The long-term goal is a persistent,
 
 The long-term design is described in `introduction.md` (kept local, not published; see `.gitignore`). This repository currently contains:
 
-- `classBasic.cpp`: the single-file development implementation; the smoke test includes it directly;
-- `smoke.cpp`: the DSH-managed public-API smoke test;
+- `classBasic.cpp`: the single-file development implementation; it defines the class template `Tree256<T>`, and the smoke test includes it directly;
+- `smoke.cpp`: the DSH-managed public-API smoke test; it instantiates `Tree256<int>`;
 - `testMain.cpp`: the owner's scratch entry point, intentionally left as a minimal compilable stub;
 - `_4lib_work/CKtree256.hpp` + `.cpp`: a **library-format snapshot** from 2026-10-28;
 - `lib/libCKtree256.a` + `lib/CKtree256.hpp`: prebuilt artifacts from that snapshot;
-- `docs/C_API_design.md`: a design draft for a future C ABI (not implemented).
+- `docs/C_API_design.md`: a design draft for a future C ABI (not implemented);
+- `docs/VSCode_Git_workflow.md`: VSCode Source Control / Git workflow notes (Chinese).
 
 > **Status: pre-alpha, structural prototype.**
-> The tree can create child-pointer arrays, read/write/clear `dataP` along byte paths, link one existing node to another by logical path, resolve those links when handed a node handle, and recursively free a subtree. HVcache has threshold/free-slot admission plus per-slot generation checks, but no eviction or pinning.
-> **Not implemented yet:** a publicly usable cross-branch node handle, cache eviction/pinning, path validation after structural changes, persistence, a formal test framework, or a build system. `get_linkNode` still takes a `treeNode**`, so external callers cannot yet use the link/cache path end-to-end.
+> The tree can create child-pointer arrays, read/write/clear a `T*` data pointer along byte paths, link one existing node to another by logical path, resolve those links when handed a node handle, and recursively free a subtree. HVcache has threshold/free-slot admission plus per-slot generation checks, but no eviction or pinning.
+> **Not implemented yet:** a publicly usable cross-branch node handle, cache eviction/pinning, path validation after structural changes, persistence, a formal test framework, or a build system. `get_linkNode` still takes a `treeNode<T>**`, so external callers cannot yet use the link/cache path end-to-end.
 > The API will change significantly. **Do not use this in production.**
 
 ## Repository layout
 
 | File / directory | Description |
 |---|---|
-| `classBasic.cpp` | Single-file development implementation (header-style .cpp, no `main`, no include guard); `smoke.cpp` includes it directly |
-| `smoke.cpp` | DSH-managed smoke test for the current public API (includes `classBasic.cpp`, does not link the library) |
+| `classBasic.cpp` | Single-file development implementation (header-style .cpp, no `main`, no include guard); defines the class template `Tree256<T>`; `smoke.cpp` includes it directly |
+| `smoke.cpp` | DSH-managed smoke test for the current public API; instantiates `Tree256<int>` (includes `classBasic.cpp`, does not link the library) |
 | `testMain.cpp` | Owner-maintained experimental entry point; DSH no longer edits it |
 | `_4lib_work/CKtree256.hpp` | Public header of the library-format snapshot (older API) |
 | `_4lib_work/CKtree256.cpp` | Library-format implementation snapshot (older API) |
 | `lib/libCKtree256.a` | Static library built from the 2026-10-28 snapshot (C++ ABI; GCC 14.2.0 / MinGW-w64) |
 | `lib/CKtree256.hpp` | Public header copy shipped with the snapshot library |
 | `docs/C_API_design.md` | C ABI design draft; not implemented |
+| `docs/VSCode_Git_workflow.md` | VSCode Source Control / Git workflow notes (Chinese) |
 | `introduction.md` | Original design discussion, kept locally and not committed |
 | `README.zh-CN.md` | Chinese version of this README |
 | `LICENSE` | MIT license |
 
-> Maintenance relationship: `classBasic.cpp` is the development source. `_4lib_work` and `lib` are an **older snapshot** (2026-10-28) and do not yet contain the path-based `link_node` or `free_nodeTree`; rebuild or resync them before treating them as current. The single-file source currently builds warning-free with GCC 14.2.0 / MinGW-w64.
+> Maintenance relationship: `classBasic.cpp` is the development source. `_4lib_work` and `lib` are an **older snapshot** (2026-10-28) and do not yet contain the path-based `link_node` or `free_nodeTree`; rebuild or resync them before treating them as current. The single-file source currently builds warning-free with GCC 14.2.0 / MinGW-w64, and `smoke.cpp` instantiates `Tree256<int>`.
 
 ## What works today
 
+`Tree256<T>` is a class template. `T` is the caller's data type; each node stores a `T*` (`dataP`), and the tree never owns that data. `smoke.cpp` instantiates `Tree256<int>`. Because `classBasic.cpp` is still included directly, the template definition is visible to that translation unit.
+
 - `createChildren(path, len)` — allocate a 256-slot child-pointer array for an existing node (idempotent; safely returns false when the path is missing)
-- `put_data(path, len, dataP)` — ensure the node exists along the path and write `dataP`; writing the same path again only overwrites the pointer and does not free the old data; `dataP` must be non-null and the tree does not own it
-- `get_data(path, len)` — read `dataP` by path; returns `nullptr` when the path is missing or the node has no data; `length == 0` reads the root
+- `put_data(path, len, T* dataP)` — ensure the node exists along the path and write `dataP`; writing the same path again only overwrites the pointer and does not free the old data; `dataP` must be non-null and the tree does not own it
+- `get_data(path, len)` — read the stored `T*` by path; returns `nullptr` when the path is missing or the node has no data; `length == 0` reads the root
 - `erase_data(path, len)` — clear `dataP` on an existing node without deleting the node; returns false when the path is missing
 - `link_node(dstPath, dstLen, targetPath, targetLen)` — link an existing destination node to an existing target node by logical path; repeated calls replace the old path; both endpoints must already exist
-- `get_linkNode(nodeP)` — resolve a link from a `treeNode**` handle; on a miss it walks the stored path, and once the source hit count passes the threshold (`minCounts_move2cache = 0x0f`) it tries to admit the target to HVcache. On a cache hit it validates the slot index, generation and target flags, then returns a pointer into the cache slot — not the target's original parent slot. A stale slot is discarded and the path is used again.
+- `get_linkNode(nodeP)` — resolve a link from a `treeNode<T>**` handle; on a miss it walks the stored path, and once the source hit count passes the threshold (`minCounts_move2cache = 0x0f`) it tries to admit the target to HVcache. On a cache hit it validates the slot index, generation and target flags, then returns a pointer into the cache slot — not the target's original parent slot. A stale slot is discarded and the path is used again.
 - `free_nodeTree(path, len)` — recursively release a subtree, each node's copied external path and its own cache slot; it does **not** free `dataP` and refuses to release the root; missing paths return false
 - Internal helpers such as `_mount_node`, `_find_node`, `_create_childrenArray`, `_free_nodeTree`, `_can_putInto_cache`, `_put2cache`, `_remove_self_from_cache` and `_forget_link_cache` — the caller must hold the lock
 - `HVcache_nodeP` / `HVcache_aliveState` / `HVcache_generation` — a non-owning pointer table with `size + 1` slots; slot 0 is a sentinel. `_can_putInto_cache` linearly scans for an already-cached target first, then takes the first free slot, and reports whether the entry is new.
@@ -78,14 +82,14 @@ Link a consumer:
 g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Ilib app.cpp lib/libCKtree256.a -o app
 ```
 
-The snapshot still exposes the old `free_node` / `link_node(treeNode**, ...)` API; it is **not** a build of the current `classBasic.cpp`. Only a C++ class interface is provided; there is no C-style / `extern "C"` header yet. `Tree256` depends on `std::mutex`, and `get_linkNode` exposes a `treeNode**` handle. A future C ABI would need a separate opaque-handle wrapper layer; see `docs/C_API_design.md`.
+The snapshot still exposes the old `free_node` / `link_node(treeNode**, ...)` API; it is **not** a build of the current `classBasic.cpp`. Only a C++ class interface is provided; there is no C-style / `extern "C"` header yet. The current `Tree256<T>` depends on `std::mutex`, and `get_linkNode` exposes a `treeNode<T>**` handle. A future C ABI would need a separate opaque-handle wrapper layer; see `docs/C_API_design.md`.
 
 ## Build and run
 
 Single-file smoke test (includes `classBasic.cpp` directly):
 
 ```bash
-g++ -std=c++20 -Wall -Wextra -Wpedantic smoke.cpp -o smoke
+g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic smoke.cpp -o smoke
 ./smoke
 ```
 
@@ -96,13 +100,13 @@ Expected output:
 [smoke] TODO: successful link_node -> get_linkNode needs a public node handle
 ```
 
-The current version builds with zero warnings under GCC 14.2.0 / MinGW-w64, and the smoke test exits with code 0. `testMain.cpp` is the owner's scratch file; its current stub also compiles, but it is not part of the smoke coverage.
+The current version builds with zero warnings under GCC 14.2.0 / MinGW-w64, and the smoke test (`Tree256<int>`) exits with code 0. `testMain.cpp` is the owner's scratch file; its current stub also compiles, but it is not part of the smoke coverage.
 
 ## TODO / known issues
 
 Ordered roughly by priority; contributions are welcome:
 
-1. **API not finalized**: the public API has `createChildren`, `put_data`, `get_data`, `erase_data`, `link_node`, `get_linkNode` and `free_nodeTree`. There is no public node-handle accessor yet, so external callers cannot use `get_linkNode` / the cache path end-to-end. `free_nodeTree` frees structure and cache slots, but the data deleter and single-node-vs-subtree semantics still need to be finalized.
+1. **API not finalized**: `Tree256<T>` requires an explicit data type (there is no default template argument), and the public API has `createChildren`, `put_data`, `get_data`, `erase_data`, `link_node`, `get_linkNode` and `free_nodeTree`. There is no public node-handle accessor yet, so external callers cannot use `get_linkNode` / the cache path end-to-end. `free_nodeTree` frees structure and cache slots, but the data deleter and single-node-vs-subtree semantics still need to be finalized.
 2. **Key and data contract**: explicit lengths support embedded 0, but the external-path format still needs a length or terminator convention, and `dataP` ownership (currently: the tree never deletes it; the caller owns it) needs to be documented as a hard contract. `get_data` cannot currently distinguish "path missing" from "node exists but has no data".
 3. **Cache is not finished**: the threshold and generation checks are wired into `get_linkNode`, but there is no eviction (LRU / CLOCK) and no pinning (a cached node must not be deleted). `_can_putInto_cache` linearly scans the slot table and takes the first free slot; the two `_put2cache` overloads duplicate logic and their return semantics need to be split. A cache hit returns a pointer into the slot table, not a stable node handle.
 4. **Cross-branch references are only half done**: the link stores a copied logical path, but there is no path validation. After the structure changes, an old path can silently point to a different node; path hashing or a global revision is needed. A public node identity/handle is also missing.
@@ -110,7 +114,7 @@ Ordered roughly by priority; contributions are welcome:
 6. **`tempNodeP_4easyFind` implicit state**: `_node_isExist` writes the result through a member variable and `_find_node` reads and clears it; a failure or early return can leave a stale value, and the duplicate traversal in `_find_node` is effectively unreachable. Return the slot pointer directly instead of going through a member variable.
 7. **Thread safety is unverified**: `privateMutex` is wired into `createChildren`, `put_data`, `get_data`, `erase_data`, `link_node`, `get_linkNode`, `free_nodeTree` and the destructor; private helpers require the caller to hold the lock. There is no concurrency test, and lock granularity is undecided.
 8. **Persistence cannot "just dump" yet**: `childFP` is a raw pointer; before it goes cross-process or to disk it must become an arena + offsets, or be serialized as node IDs.
-9. **No formal tests or CI**: `smoke.cpp` covers the current public API, and `testMain.cpp` is the owner's scratch file; there is no unit-test framework, CMake, or GitHub Actions.
+9. **No formal tests or CI**: `smoke.cpp` covers the current public API with `Tree256<int>`, and `testMain.cpp` is the owner's scratch file; there is no unit-test framework, CMake, or GitHub Actions.
 10. **Recursive free depth = key length**: the author is aware of and accepts that very deep keys may overflow the stack; this can later be converted to an explicit stack.
 11. **Naming legacy**: `size0f_HVcache`, `length_externaRelatedlLink_nodePath`, `self_cacheIndex`, and similar spelling/style issues need to be unified.
 12. **Exception safety**: `_mount_node` / `_create_childrenArray` use throwing `new`, while `_link_node` uses nothrow `new`; the `bool` public API therefore has an inconsistent exception contract.

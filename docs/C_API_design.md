@@ -1,16 +1,16 @@
 # CKtree256 C API 设计草案（v0.1-draft）
 
-> 状态：设计草案，**未实现**；本文只记录方案，不修改 `Tree256`，也不提供 C ABI。
-> 日期：2026-11-13
-> 基线：HEAD `e91deb2 v0.1.6T`；`classBasic.cpp` 是开发源（663 行 / SHA256 `374fce76...56fb`），`_4lib_work` 是 2026-10-28 的旧库化快照，尚未同步 path 版 `link_node` / `free_nodeTree`。
+> 状态：设计草案，**未实现**；本文只记录方案，不修改 `Tree256<T>`，也不提供 C ABI。
+> 日期：2026-11-14
+> 基线：HEAD `d08cd08 v0.1.7T`；`classBasic.cpp` 是开发源（665 行 / 28,531 B / SHA256 `28c30ea5...9bae`），已改为类模板 `Tree256<T>`；`_4lib_work` 是 2026-10-28 的旧库化快照（非模板），尚未同步 path 版 `link_node` / `free_nodeTree`。
 > 注：当前工作区 `classBasic.cpp` 有未提交改动；本文以当前代码为准，未改动源码。
 
 ## 1. 目标与边界
 
-目标：在不重构 `Tree256` 类的前提下，给 C / FFI 调用方提供稳定的不透明句柄接口：
+目标：在不重构 `Tree256<T>` 类模板的前提下，给 C / FFI 调用方提供稳定的不透明句柄接口。C wrapper 选择 `Tree256<void>`（`T = void`，数据为 `void*`），这样 C 侧传入的 `void* data` 正好匹配 `put_data` 的参数：
 
 - 类实例由库内部注册表管理，C 侧只拿 handle；
-- C 侧不接触 `Tree256` 布局、`std::mutex`、`treeNode` 或任何 C++ 类型；
+- C 侧不接触 `Tree256<void>` 布局、`std::mutex`、`treeNode<void>` 或任何 C++ 类型；
 - C++ 类接口保留为内部/开发接口，C ABI 是最终对外接口；
 - 每个 C 入口先校验 handle，再转发到类实例；
 - C++ 异常不允许穿过 C ABI。
@@ -38,11 +38,11 @@
 
 | 方案 | 校验 | 主要问题 |
 |---|---|---|
-| `void*` = `Tree256*`，注册表查找 | 数组/哈希表 | 挡不住释放后地址复用；旧句柄可能变成新树；线性扫描 O(n) |
+| `void*` = `Tree256<void>*`，注册表查找 | 数组/哈希表 | 挡不住释放后地址复用；旧句柄可能变成新树；线性扫描 O(n) |
 | `void**` = `&slots[i]` | 固定数组范围 + 槽状态 | 槽复用后旧 handle 指向新实例；句柄不带 generation；`*handle` 还可被调用方改写 |
 | `uint64_t` = index + generation | 查固定槽表 | 推荐；无裸指针、旧 handle 永久失效、O(1) |
 
-结论：**最终 ABI 用 `uint64_t`，低 32 位放 `index + 1`，高 32 位放 `generation`，0 表示无效。** 不把 `Tree256*` 当句柄，也不把 `void**` 槽地址当最终 handle。
+结论：**最终 ABI 用 `uint64_t`，低 32 位放 `index + 1`，高 32 位放 `generation`，0 表示无效。** 不把 `Tree256<void>*` 当句柄，也不把 `void**` 槽地址当最终 handle。
 
 ### 2.3 句柄编码
 
@@ -52,7 +52,7 @@ bit 31..0  : index + 1 (0 保留给 invalid handle)
 ~~~
 
 - 槽位数组固定长度 `CKTREE_MAX_INSTANCES`，默认可以从 64 开始；数组不扩容，保证槽地址稳定。
-- 每个槽：`shared_ptr<Tree256> tree; uint32_t generation; bool alive;`。
+- 每个槽：`shared_ptr<Tree256<void>> tree; uint32_t generation; bool alive;`。
 - `create` 找空闲槽，`generation++`（回绕时退役该槽或返回失败），分配实例，返回 `(generation << 32) | (index + 1)`。
 - `resolve` 先检查 `index < capacity`、`alive` 和 `generation` 完全一致，再复制 `shared_ptr` 给调用方。
 - `destroy` 在注册表锁内标记 `alive = false`、取出 `shared_ptr`，锁外释放；槽可复用，复用时 `generation` 递增，旧 handle 失效。
@@ -70,7 +70,7 @@ bit 31..0  : index + 1 (0 保留给 invalid handle)
 
 ~~~cpp
 struct Slot {
-    std::shared_ptr<Tree256> tree;
+    std::shared_ptr<Tree256<void>> tree;
     std::uint32_t generation = 0;
     bool alive = false;
 };
@@ -79,14 +79,14 @@ std::array<Slot, CKTREE_MAX_INSTANCES> g_slots;
 std::mutex g_registryMutex;
 ~~~
 
-- `create`：在锁内找空槽并预留；构造 `Tree256` 可能抛异常，必须捕获；失败返回 0，不留下半初始化槽。
+- `create`：在锁内找空槽并预留；构造 `Tree256<void>` 可能抛异常，必须捕获；失败返回 0，不留下半初始化槽。
 - `resolve`：锁内校验并复制 `shared_ptr`，锁外调用类方法；不要持注册表锁执行 `put/get`，否则所有实例被串行化。
 - `destroy`：锁内移除并取走 `shared_ptr`，锁外释放；正在执行的调用持有自己的 `shared_ptr`，对象不会 UAF。
-- 同一实例的并发调用由 `Tree256` 内部的 `privateMutex` 串行化；C wrapper 不再加第二把实例锁。
+- 同一实例的并发调用由 `Tree256<void>` 内部的 `privateMutex` 串行化；C wrapper 不再加第二把实例锁。
 
 ### 3.2 线程安全边界
 
-- `Tree256` 自己的锁保护树结构和缓存；
+- `Tree256<void>` 自己的锁保护树结构和缓存；
 - 注册表锁只保护 `slots`、`alive`、`generation` 和 `tree` 指针；
 - `destroy` 与 `get/put` 并发：已拿到 `shared_ptr` 的调用允许完成；后续 `resolve` 失败；
 - 不承诺 `destroy` 会中断正在执行的调用；需要“立即取消”要另加取消机制。
@@ -95,10 +95,10 @@ std::mutex g_registryMutex;
 
 ### 4.1 当前代码约束
 
-- `link_node` 现在有 path 版目标入口（`classBasic.cpp:563`），但 `get_linkNode` 仍要求 `treeNode**`（`classBasic.cpp:580`），没有公开 node handle；C 侧目前只能“写链接”，不能“读链接”，所以 v1 不包含 link。
-- `free_nodeTree` 已实现（`classBasic.cpp:634`），会递归释放子树、external path 和节点自己的缓存槽；但它不释放 `dataP`，也不允许释放根节点。`put_data` 的 `dataP` 是非拥有指针（`classBasic.cpp:32`、`:499-501`），`freeData` 和删除粒度未定，所以 C 层只提供整树 `destroy`。
+- `link_node` 现在有 path 版目标入口（`classBasic.cpp:565`），但 `get_linkNode` 仍要求 `treeNode<void>**`（`classBasic.cpp:582`），没有公开 node handle；C 侧目前只能“写链接”，不能“读链接”，所以 v1 不包含 link。
+- `free_nodeTree` 已实现（`classBasic.cpp:636`），会递归释放子树、external path 和节点自己的缓存槽；但它不释放 `dataP`，也不允许释放根节点。`put_data` 的 `dataP` 是非拥有指针（`classBasic.cpp:33`、`:506`），`freeData` 和删除粒度未定，所以 C 层只提供整树 `destroy`。
 - 当前 `get_data` 对“路径缺失”和“节点存在但无 data”都返回 `nullptr`；C 层第一版继承这个限制，不假装能区分。
-- `smoke.cpp` 已覆盖当前 public API 的冒烟测试（root/key/prefix/embedded 0/invalid args/createChildren/link_node 参数检查/free_nodeTree）；`testMain.cpp` 已移交作者作为自用实测入口。README 和本文已按当前 API 更新；`_4lib_work` / `lib` 仍是旧快照。
+- `smoke.cpp` 已覆盖当前 public API 的冒烟测试，实例化为 `Tree256<int>`（root/key/prefix/embedded 0/invalid args/createChildren/link_node 参数检查/free_nodeTree）；`testMain.cpp` 已移交作者作为自用实测入口。README 和本文已按当前 API 更新；`_4lib_work` / `lib` 仍是旧快照。
 
 ### 4.2 C 头文件草案
 
@@ -179,7 +179,7 @@ CKTREE_API cktree_status cktree_create_children(cktree_handle handle,
 - `cktree_erase`：找不到返回 `CKTREE_ERR_NOT_FOUND`；成功清除 data 并返回 OK。
 - `cktree_create_children`：已存在子数组时幂等成功；路径不存在返回 `CKTREE_ERR_NOT_FOUND`。
 - key 为 `nullptr + len == 0` 表示根；`nullptr + len > 0` 非法；非空 key 的 `len` 是唯一路径长度，不依赖 C 字符串终止符。
-- 所有 `cktree_handle` 参数先校验；无效 handle 不进入 `Tree256`，不解引用任何旧指针。
+- 所有 `cktree_handle` 参数先校验；无效 handle 不进入 `Tree256<void>`，不解引用任何旧指针。
 
 ### 4.4 异常与错误
 
