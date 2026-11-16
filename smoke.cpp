@@ -9,9 +9,12 @@
 //
 // Coverage: root/empty path, single-byte and multi-byte keys, prefix nodes,
 // embedded 0, overwrite, missing paths, invalid arguments, createChildren,
-// link_node argument checks, and free_nodeTree.
-// Not covered: successful link_node -> get_linkNode jumps, because get_linkNode
-// still takes treeNode** and there is no public node-handle accessor yet.
+// link_node argument checks and successful path copy, path-based get_linkNode,
+// repeated jumps that cross the target-side hitCounts_4beJumped threshold
+// (cache admission and cache hits), relink, missing source/target, free_nodeTree
+// while the freed targets are cached, and the independent 0x00 branch.
+// Not covered: the private _cache_eviction sweep/fallback policy (it has no caller
+// yet), pinning, concurrent access, and allocation-failure paths.
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -95,20 +98,47 @@ int main()
     assert(!tree.createChildren(keyMissing, 2));
     assert(tree.get_data(keyA, 1) == &overwrittenData);
 
-    // 9) link_node: both endpoints must exist. Successful links cannot be read by
-    //    this smoke test because get_linkNode still needs a treeNode** handle.
+    // 9) link_node: both endpoints must exist, and the target path is copied
+    //    (allocation failure propagates as std::bad_alloc). get_linkNode takes the
+    //    source path, so the link/cache path is now usable without a public handle.
+    assert(tree.get_linkNode(keyA, 1) == nullptr);        // no link yet
     assert(!tree.link_node(keyMissing, 2, keyA, 1));      // missing destination
     assert(!tree.link_node(keyA, 1, keyMissing, 2));      // missing target
     assert(!tree.link_node(keyA, 1, nullptr, 1));         // invalid target path
     assert(tree.link_node(keyA, 1, nullptr, 0));          // A -> root, valid
-    assert(tree.link_node(keyA, 1, keyAB, 2));            // relink A -> AB
+    CKtree::treeNode* rootNode = tree.get_linkNode(keyA, 1);
+    assert(rootNode != nullptr);                          // length 0 resolves to the root
 
-    // 10) free_nodeTree releases A, AB and ABC, but leaves the root alone.
+    assert(tree.link_node(keyA, 1, keyAB, 2));            // relink A -> AB
+    CKtree::treeNode* linkedAB = tree.get_linkNode(keyA, 1);
+    assert(linkedAB != nullptr);
+    assert(linkedAB != rootNode);
+    for (int i = 0; i < 20; ++i)                          // cross the threshold, then hit the cache
+    {
+        assert(tree.get_linkNode(keyA, 1) == linkedAB);
+    }
+
+    assert(tree.link_node(keyA, 1, keyABC, 3));           // relink A -> ABC
+    CKtree::treeNode* linkedABC = tree.get_linkNode(keyA, 1);
+    assert(linkedABC != nullptr);
+    assert(linkedABC != linkedAB);
+    for (int i = 0; i < 20; ++i)
+    {
+        assert(tree.get_linkNode(keyA, 1) == linkedABC);
+    }
+
+    assert(tree.link_node(keyA, 1, nullptr, 0));          // relink A -> root again
+    assert(tree.get_linkNode(keyA, 1) == rootNode);
+    assert(tree.get_linkNode(keyMissing, 2) == nullptr);  // missing source path
+
+    // 10) free_nodeTree releases A, AB and ABC (the targets were cached above),
+    //     but leaves the root alone.
     assert(!tree.free_nodeTree(nullptr, 0));              // root cannot be released
     assert(tree.free_nodeTree(keyA, 1));
     assert(tree.get_data(keyA, 1) == nullptr);
     assert(tree.get_data(keyAB, 2) == nullptr);
     assert(tree.get_data(keyABC, 3) == nullptr);
+    assert(tree.get_linkNode(keyA, 1) == nullptr);        // source is gone
     assert(tree.get_data(nullptr, 0) == &rootData);
     assert(!tree.free_nodeTree(keyA, 1));                 // already gone
 
@@ -120,7 +150,7 @@ int main()
     assert(tree.free_nodeTree(keyZero, 1));
     assert(tree.get_data(nullptr, 0) == &rootData);
 
-    std::puts("[smoke] put_data / get_data / erase_data / createChildren / link_node / free_nodeTree OK");
-    std::puts("[smoke] TODO: successful link_node -> get_linkNode needs a public node handle");
+    std::puts("[smoke] put_data / get_data / erase_data / createChildren / link_node / get_linkNode / free_nodeTree OK");
+    std::puts("[smoke] target-side hitCounts_4beJumped admission, cache hit, relink and cached-target free OK");
     return 0;
 }

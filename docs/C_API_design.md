@@ -1,8 +1,8 @@
 # CKtree256 C API 设计草案（v0.1-draft）
 
 > 状态：设计草案，**未实现**；本文只记录方案，不修改 `Tree256`，也不提供 C ABI。
-> 日期：2026-11-13
-> 基线：HEAD `e91deb2 v0.1.6T`；`classBasic.cpp` 是开发源（663 行 / SHA256 `374fce76...56fb`），`_4lib_work` 是 2026-10-28 的旧库化快照，尚未同步 path 版 `link_node` / `free_nodeTree`。
+> 日期：2026-11-16（基线更新；草案初稿 2026-11-13）
+> 基线：HEAD `d08cd08 v0.1.7T`；`classBasic.cpp` 是开发源（721 行 / SHA256 `ad23e0e0...874bc6`），`_4lib_work` / `lib` 已同步为当前库化拆分（2026-11-16）。
 > 注：当前工作区 `classBasic.cpp` 有未提交改动；本文以当前代码为准，未改动源码。
 
 ## 1. 目标与边界
@@ -17,7 +17,7 @@
 
 非目标（本版不做）：
 
-- 不包装 `get_linkNode`（仍缺公开 node handle；见 `4.1`）；`link_node` 已有 path 版，但是否进入 v1 见开放问题。
+- 不包装 `get_linkNode`：它现在有 path 版入口，但返回裸 `treeNode*`，没有稳定 node 身份/存活期规则（见 `4.1`）；`link_node` 已有 path 版，但是否进入 v1 见开放问题。
 - C ABI v1 不包装 `free_nodeTree`（类里已实现，但 `freeData` / 删除粒度未定）；
 - 不解决路径失效、缓存淘汰/pin、持久化或跨进程；
 - 不把 C ABI 冻结为最终版本，先以 `CKTREE_C_API_VERSION 1` 为草案。
@@ -95,10 +95,10 @@ std::mutex g_registryMutex;
 
 ### 4.1 当前代码约束
 
-- `link_node` 现在有 path 版目标入口（`classBasic.cpp:563`），但 `get_linkNode` 仍要求 `treeNode**`（`classBasic.cpp:580`），没有公开 node handle；C 侧目前只能“写链接”，不能“读链接”，所以 v1 不包含 link。
-- `free_nodeTree` 已实现（`classBasic.cpp:634`），会递归释放子树、external path 和节点自己的缓存槽；但它不释放 `dataP`，也不允许释放根节点。`put_data` 的 `dataP` 是非拥有指针（`classBasic.cpp:32`、`:499-501`），`freeData` 和删除粒度未定，所以 C 层只提供整树 `destroy`。
+- `link_node` 现在有 path 版目标入口（`classBasic.cpp:659`）；`get_linkNode` 也改成 path 输入（`classBasic.cpp:676`），但返回裸 `treeNode*`（内部私有解析在 `classBasic.cpp:432`），没有稳定 node handle/存活期规则；C 侧虽然能“读写链接”，仍无法安全地把返回节点交给调用方长期持有，所以 v1 不包含 link。`link_node` 复制目标路径时用抛异常的 `new`（`classBasic.cpp:403`），分配失败会抛 `std::bad_alloc`；v1.1 若包装它，C 入口必须捕获并映射为 `CKTREE_ERR_NO_MEMORY`。
+- `free_nodeTree` 已实现（`classBasic.cpp:692`），会递归释放子树、external path 和节点自己的缓存槽；但它不释放 `dataP`，也不允许释放根节点。`put_data` 的 `dataP` 是非拥有指针（`classBasic.cpp:32`；`put_data` 在 `:600`，`get_data` 在 `:620`），`freeData` 和删除粒度未定，所以 C 层只提供整树 `destroy`。
 - 当前 `get_data` 对“路径缺失”和“节点存在但无 data”都返回 `nullptr`；C 层第一版继承这个限制，不假装能区分。
-- `smoke.cpp` 已覆盖当前 public API 的冒烟测试（root/key/prefix/embedded 0/invalid args/createChildren/link_node 参数检查/free_nodeTree）；`testMain.cpp` 已移交作者作为自用实测入口。README 和本文已按当前 API 更新；`_4lib_work` / `lib` 仍是旧快照。
+- `smoke.cpp` 已覆盖当前 public API：root/key/prefix/embedded 0/invalid args/createChildren/link_node 参数检查与成功路径复制/get_linkNode 路径读取/重复跳转/relink/free_nodeTree；不覆盖私有 `_cache_eviction`（没有调用方）、pin、并发和分配失败。`testMain.cpp` 已移交作者作为自用实测入口。README 和本文已按当前 API 更新；`_4lib_work` / `lib` 已同步为当前拆分，但 C ABI 本身仍未实现。
 
 ### 4.2 C 头文件草案
 
@@ -184,6 +184,7 @@ CKTREE_API cktree_status cktree_create_children(cktree_handle handle,
 ### 4.4 异常与错误
 
 - 所有 C 入口用 `try/catch` 包住：`std::bad_alloc` → `CKTREE_ERR_NO_MEMORY`；其他异常 → `CKTREE_ERR_INTERNAL`；C++ 异常不得穿过 C ABI。
+- 如果 v1.1 包装 `link_node`，其路径复制可能抛 `std::bad_alloc`，`cktree_link_path` 必须捕获并映射为 `CKTREE_ERR_NO_MEMORY`。
 - `cktree_create` 返回句柄而不是 status，因此内存不足/容量满都只能返回 0；如果需要细分，加 `cktree_last_error()`（线程局部），本版先不做。
 - 不放 `bool` 到 ABI；status 用 `int` + 宏常量，避免 C enum 宽度差异。
 
@@ -212,7 +213,7 @@ lib/libCKtree256_c.a          可选：独立 C ABI 静态库
 
 暂不包含：
 
-- `get_linkNode`：仍缺 path 版读取；`link_node` 的 path 版已存在，可在 v1.1 包 `cktree_link_path`，但配套读取 API 未定。
+- `get_linkNode`：path 版读取已存在，但返回裸 `treeNode*`；在稳定 node handle/存活期规则确定前，不进入 v1。`link_node` 的 path 版可在 v1.1 包 `cktree_link_path`。
 - `free_nodeTree`：虽然类里已实现，C ABI v1 仍不包装；先定 data deleter、单节点/子树粒度和缓存/外链失效。
 - 缓存淘汰/pin、持久化、跨进程、节点压缩。
 
@@ -236,7 +237,7 @@ lib/libCKtree256_c.a          可选：独立 C ABI 静态库
 - 是否必须支持 `void*` handle 的 FFI；如果必须，是否接受边界转换。
 - 独立 `libCKtree256_c.a` 还是合并进现有 `libCKtree256.a`。
 - 命名前缀用 `cktree_` 还是 `CKtree_`；DLL 名称和导出宏。
-- 已存在的 path 版 `link_node` 是否在 v1 包成 `cktree_link_path`；`get_linkNode` 何时补 path 读取和节点身份（`node_id/generation`）。
+- 已存在的 path 版 `link_node` 是否在 v1 包成 `cktree_link_path`；`get_linkNode` 的 path 读取已经存在，但何时补稳定节点身份（`node_id/generation`）和返回指针存活期规则仍未定。
 - `free_nodeTree` 的 data deleter 回调、子树/单节点语义、缓存和外链失效。
 - 是否需要 C11 `stdbool`/`bool`；本草案统一用 `int` 返回状态。
 - 是否需要 ABI 兼容性测试（C 调用方 + C++ 库/不同编译器）。
@@ -244,6 +245,6 @@ lib/libCKtree256_c.a          可选：独立 C ABI 静态库
 ## 9. 实施状态
 
 - **未实现**；本文只作为后续实现的设计基线。
-- 未修改 `classBasic.cpp`、`_4lib_work` 或 `lib`；没有新增 C 头文件/实现文件。
-- `smoke.cpp` 已更新为当前 public API 的冒烟测试；`testMain.cpp` 归作者自用。
-- 启动条件：需要 C/FFI 调用方，或准备冻结对外 ABI；在此之前优先补公开 node handle / path 读取、路径失效校验和 `free_nodeTree` 的 data deleter 语义。
+- 未修改 `classBasic.cpp`；`_4lib_work` / `lib` 已于 2026-11-16 同步为当前 C++ 类接口的库化拆分；没有新增 C 头文件/实现文件。
+- `smoke.cpp` 已更新为当前 public API 的冒烟测试，覆盖 `link_node` / `get_linkNode`、重复跳转、relink 和缓存中目标释放；仍不覆盖私有 `_cache_eviction`、pin 和并发；`testMain.cpp` 归作者自用。
+- 启动条件：需要 C/FFI 调用方，或准备冻结对外 ABI；在此之前优先补稳定 node handle/身份、路径失效校验和 `free_nodeTree` 的 data deleter 语义。

@@ -1,0 +1,10 @@
+# Strip trailing spaces/tabs from C++ sources when staged.
+# Local setup:
+#   git config filter.stripws.clean "sed -e 's/[[:blank:]]*$//'"
+#   git config filter.stripws.smudge cat
+# Do not include *.md in the filter: two trailing spaces are a Markdown hard line break.
+# Instead, tell git not to report them as whitespace errors.
+*.md  whitespace=-trailing-space
+*.cpp filter=stripws
+*.h   filter=stripws
+*.hpp filter=stripws
